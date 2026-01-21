@@ -792,11 +792,12 @@ class LltJbd_Up16s(Battery):
                         logger.warning("Another process is interfering with serial communication. Retrying...")
                     else:
                         non_interference_retries += 1
-                        if non_interference_retries >= max_non_interference_retries:
-                            return result
                 else:
                     # It's not clear whether this branch is ever called, but since we already have the retry logic, we can use it for this case too.
                     logger.warning("Can't open serial connection. Retrying...")
+                    non_interference_retries += 1
+                if non_interference_retries >= max_non_interference_retries:
+                    return result
             time.sleep(INTERFERENCE_DELAY_SECONDS)
         return False
 
