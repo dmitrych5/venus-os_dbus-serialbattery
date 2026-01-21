@@ -300,7 +300,7 @@ class LltJbd_Up16s(Battery):
         super(LltJbd_Up16s, self).__init__(port, baud, address)
         self.type = self.BATTERYTYPE
         self.history.exclude_values_to_calculate = ["charge_cycles"]
-        self.address_int = int.from_bytes(address)
+        self.address_int = int.from_bytes(address, "big")
         self.bms_model_and_serial_number = None
         self.pack_serial_number = None
         self.rated_capacity = None
