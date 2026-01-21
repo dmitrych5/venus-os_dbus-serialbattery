@@ -13,7 +13,6 @@ from typing import List, Any, Callable, Optional, Union
 import serial
 import time
 
-
 # CONSTANTS
 DRIVER_VERSION: str = "2.1.202601010dev"
 """

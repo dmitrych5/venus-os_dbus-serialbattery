@@ -7,7 +7,6 @@ from unittest.mock import MagicMock, patch, PropertyMock
 from utils import read_serialport_data
 import serial
 
-
 # =============================================================================
 # Fixtures
 # =============================================================================
