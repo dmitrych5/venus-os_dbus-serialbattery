@@ -76,6 +76,14 @@ class DbusHelper:
         """
         Last time the history values were calculated.
         """
+        self.settings_saved_last_time: int = 0
+        """
+        Last time the battery state was saved to dbus settings.
+        """
+        self.last_seen_saved_last_time: int = 0
+        """
+        Last time the LastSeen dbus setting was refreshed.
+        """
         self.telemetry_upload_error_count: int = 0
         self.telemetry_upload_interval: int = 60 * 60 * 3  # 3 hours
         self.telemetry_upload_last: int = 0
@@ -1250,8 +1258,21 @@ class DbusHelper:
             self.history_calculated_last_time = int(time())
 
         # save settings every 15 seconds to dbus
-        if int(time()) % 15:
+        if int(time()) - self.settings_saved_last_time >= 15:
             self.save_current_battery_state()
+            self.settings_saved_last_time = int(time())
+
+        # refresh LastSeen daily: setup_instance() removes entries not seen for over 30 days,
+        # which orphans the other batteries on this port once driver uptime exceeds that
+        if int(time()) - self.last_seen_saved_last_time >= 60 * 60 * 24:
+            self.set_settings(
+                get_bus(),
+                "com.victronenergy.settings",
+                self.path_battery,
+                "LastSeen",
+                int(time()),
+            )
+            self.last_seen_saved_last_time = int(time())
 
         if self.battery.soc is not None:
             logger.debug("logged to dbus [%s]" % str(round(self.battery.soc, 2)))
