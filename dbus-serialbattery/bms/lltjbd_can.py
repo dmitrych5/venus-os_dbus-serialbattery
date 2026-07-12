@@ -12,7 +12,7 @@
 # Tested with JBD UP16S015.
 
 from __future__ import absolute_import, division, print_function, unicode_literals
-from battery import Battery, Cell
+from battery import Battery, Cell, Protection
 from utils import (
     get_connection_error_message,
     logger,
@@ -56,7 +56,7 @@ class LltJbd_Can(Battery):
     MIN_TEMP_SENSOR_ID = "MIN_TEMP_SENSOR_ID"
     MAX_TEMP_SENSOR_ID = "MAX_TEMP_SENSOR_ID"
     ENERGY_CHARGED_DISCHARGED = "ENERGY_CHARGED_DISCHARGED"
-    CAPACITY = "CAPACITY"
+    RATED_CAPACITY = "RATED_CAPACITY"
     BMS_SERIAL_NUMBER_1 = "BMS_SERIAL_NUMBER_1"
     BMS_SERIAL_NUMBER_2 = "BMS_SERIAL_NUMBER_2"
     PRODUCT_ID = "PRODUCT_ID"
@@ -85,7 +85,7 @@ class LltJbd_Can(Battery):
         ENERGY_CHARGED_DISCHARGED: [0x378],  # Returns all 0.
         # JBD BMS appears to take only the capacity of the master battery pack and multiply it by the number of the packs regardless of the actual capacity of
         # the other packs.
-        CAPACITY: [0x379],
+        RATED_CAPACITY: [0x379],
         # JBD BMS by default returns a dummy non-unique value in 0x380 and 0x381 frames, but it can be reprogrammed in the BMS software.
         BMS_SERIAL_NUMBER_1: [0x380],
         BMS_SERIAL_NUMBER_2: [0x381],
@@ -98,11 +98,6 @@ class LltJbd_Can(Battery):
     DATA_CHECK_CAPACITY = 4
     DATA_CHECK_CELL_VOLTAGES = 8
     DATA_CHECK_MAX = 16
-
-    # Protection constants
-    PROTECTION_OK = 0
-    PROTECTION_WARNING = 1
-    PROTECTION_ALARM = 2
 
     def connection_name(self) -> str:
         return f"CAN socketcan:{self.port}"
@@ -171,32 +166,31 @@ class LltJbd_Can(Battery):
     def convert_protection_value(self, data, byte_offset, bit_index):
         # Check for alarm state
         if (data[byte_offset] & (1 << bit_index)) != 0:
-            return self.PROTECTION_ALARM
+            return Protection.ALARM
         # Check for warning state. Warnings have the same bit structure, just 4 bytes later.
         if (data[byte_offset + 4] & (1 << bit_index)) != 0:
-            return self.PROTECTION_WARNING
-        return self.PROTECTION_OK
+            return Protection.WARNING
+        return Protection.OK
 
-    def to_protection_bits(self, data):
+    def convert_from_can_victron_protection_bitmask(self, data):
         """
         Parse alarm and warning data from frame 0x35A.
         Source: https://www.genetrysolar.com/wp-content/uploads/wpforo/default_attachments/IPB/s3_g308908/monthly_2023_02/1016944466_can-bus_bms_protocol20210417_pdf.b32c1954d6145579b857d66191327e30 # noqa: E501
-        TODO: Verify BMS actually sets these values, in this format.
+        13.3.2 firmware returns only low/high charge/discharge temperature and high charge/discharge current flags.
         """
-        high_cell_voltage = self.convert_protection_value(data, 0, 2)
-        low_cell_voltage = self.convert_protection_value(data, 0, 4)
+        high_voltage = self.convert_protection_value(data, 0, 2)
+        low_voltage = self.convert_protection_value(data, 0, 4)
         high_temperature = self.convert_protection_value(data, 0, 6)
         low_temperature = self.convert_protection_value(data, 1, 0)
         high_charge_temperature = self.convert_protection_value(data, 1, 2)
         low_charge_temperature = self.convert_protection_value(data, 1, 4)
-        high_discharge_current = self.convert_protection_value(data, 1, 6)
-        high_charge_current = self.convert_protection_value(data, 2, 0)
+        high_discharge_current = self.convert_protection_value(data, 1, 6)  # Slow or fast discharge overcurrent
+        high_charge_current = self.convert_protection_value(data, 2, 0)  # Slow or fast charge overcurrent
         short_circuit = self.convert_protection_value(data, 2, 4)
         internal_fault = self.convert_protection_value(data, 2, 6)
         cell_imbalance = self.convert_protection_value(data, 3, 0)
-
-        self.protection.high_cell_voltage = high_cell_voltage
-        self.protection.low_cell_voltage = low_cell_voltage
+        self.protection.high_voltage = high_voltage
+        self.protection.low_voltage = low_voltage
         self.protection.cell_imbalance = cell_imbalance
         self.protection.high_discharge_current = max(high_discharge_current, short_circuit)
         self.protection.high_charge_current = high_charge_current
@@ -253,12 +247,13 @@ class LltJbd_Can(Battery):
 
             # 0x35A: Alarms and Warnings
             elif frame_id in self.CAN_FRAMES[self.ALARMS_WARNINGS]:
-                self.to_protection_bits(data)
+                self.convert_from_can_victron_protection_bitmask(data)
 
             # 0x35F: Battery Type, Firmware Version, Capacity, Product ID
             elif frame_id in self.CAN_FRAMES[self.BATTERY_INFO]:
                 # battery_type = self.bytes_to_string(data[0:2])
-                firmware_version = unpack_from("<H", data, 2)[0]
+                firmware_version_major = unpack_from("<B", data, 2)[0]
+                firmware_version_minor = unpack_from("<B", data, 3)[0]
                 capacity_ah = unpack_from("<H", data, 4)[0]
                 # product_id = unpack_from("<H", data, 6)[0]
 
@@ -267,7 +262,7 @@ class LltJbd_Can(Battery):
                     self.capacity = capacity_ah
                     data_check |= self.DATA_CHECK_CAPACITY
 
-                self.version = f"0x{firmware_version:04X}"
+                self.version = f"{firmware_version_major}.{firmware_version_minor}"
 
             # 0x370: BMS Model (Part 1)
             elif frame_id in self.CAN_FRAMES[self.BMS_MODEL_1]:
@@ -299,11 +294,11 @@ class LltJbd_Can(Battery):
 
                 data_check |= self.DATA_CHECK_CELL_VOLTAGES
 
-            # 0x379: Capacity
-            elif frame_id in self.CAN_FRAMES[self.CAPACITY]:
-                capacity_ah = unpack_from("<H", data, 0)[0]
-                if capacity_ah > 0:
-                    self.capacity = capacity_ah
+            # 0x379: Rated capacity
+            elif frame_id in self.CAN_FRAMES[self.RATED_CAPACITY]:
+                rated_capacity_ah = unpack_from("<H", data, 0)[0]
+                if rated_capacity_ah > 0:
+                    self.capacity = rated_capacity_ah
                     data_check |= self.DATA_CHECK_CAPACITY
 
             # 0x380: BMS Serial Number (Part 1)
